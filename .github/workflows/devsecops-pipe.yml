@@ -1,0 +1,10 @@
+name: DevSecOps Pipeline
+on: [push]
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gitleaks — secrets scan
+        uses: gitleaks/gitleaks-action@v2
