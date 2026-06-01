@@ -1,3 +1,3 @@
-# te
+# teste do GitLeaks
 
 AWS_SECRET_ACCESS_KEY="123456789ABCDEF"
