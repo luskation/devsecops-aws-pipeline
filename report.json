@@ -1,0 +1,23 @@
+[
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 3,
+  "EndLine": 3,
+  "StartColumn": 2,
+  "EndColumn": 40,
+  "Match": "AWS_SECRET_ACCESS_KEY=\"123456789ABCDEF\"",
+  "Secret": "123456789ABCDEF",
+  "File": "src/app.py",
+  "SymlinkFile": "",
+  "Commit": "81762e4c676c2d9b5ef8c287601165036736c489",
+  "Link": "https://github.com/luskation/devsecops-aws-pipeline/blob/81762e4c676c2d9b5ef8c287601165036736c489/src/app.py#L3",
+  "Entropy": 3.9068906,
+  "Author": "Lucas Rodrigues",
+  "Email": "lucasor2006@gmail.com",
+  "Date": "2026-06-01T14:10:24Z",
+  "Message": "test: testes do GitLeak com secret fake",
+  "Tags": [],
+  "Fingerprint": "81762e4c676c2d9b5ef8c287601165036736c489:src/app.py:generic-api-key:3"
+ }
+]
