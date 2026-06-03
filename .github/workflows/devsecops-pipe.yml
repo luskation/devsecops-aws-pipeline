@@ -2,50 +2,33 @@ name: DevSecOps Pipeline
 
 on:
   push:
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   secret-scanning:
     name: Gitleaks Secret Scan
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Gitleaks
-        run: |
-          GITLEAKS_VERSION=8.24.2
-          wget https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
-          tar -xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
-          sudo mv gitleaks /usr/local/bin/
+        with:
+          fetch-depth: 0 
 
       - name: Run Gitleaks
-        run: |
-          mkdir -p reports
-
-          # SARIF é um padrão aberto para troca de resultados de
-          # ferramentas de segurança e análise estática.
-          gitleaks detect \
-            --source . \
-            --report-format sarif \
-            --report-path reports/gitleaks.sarif
-
-      - name: Upload Gitleaks Report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: gitleaks-report
-          path: reports/gitleaks.sarif
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   lint:
     name: ESLint Analysis
     runs-on: ubuntu-latest
     needs: secret-scanning
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,6 +37,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: 'npm'
 
       - name: Install Dependencies
         run: npm ci
@@ -65,23 +49,14 @@ jobs:
     name: Semgrep SAST
     runs-on: ubuntu-latest
     needs: lint
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Semgrep
-        run: |
-          python3 -m pip install semgrep
-
       - name: Run Semgrep
         run: |
           mkdir -p reports
-
-          semgrep scan \
-            --config auto \
-            --sarif \
-            --output reports/semgrep.sarif
+          docker run --rm -v "${{ github.workspace }}:/src" semgrep/semgrep semgrep scan --config auto --sarif --output reports/semgrep.sarif
 
       - name: Upload Semgrep Report
         uses: actions/upload-artifact@v4
@@ -89,11 +64,11 @@ jobs:
         with:
           name: semgrep-report
           path: reports/semgrep.sarif
+
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
     needs: semgrep
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,22 +92,16 @@ jobs:
     name: Checkov IaC Scan
     runs-on: ubuntu-latest
     needs: sonarcloud
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Checkov
-        run: |
-          python3 -m pip install checkov
-
       - name: Run Checkov
-        run: |
-          mkdir -p reports
-
-          checkov -d . \
-            --output sarif \
-            --output-file-path reports/checkov.sarif
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          output_format: sarif
+          output_file_path: reports/checkov.sarif
 
       - name: Upload Checkov Report
         uses: actions/upload-artifact@v4
@@ -141,67 +110,12 @@ jobs:
           name: checkov-report
           path: reports/checkov.sarif
 
-  docker-build:
-    name: Docker Build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build Docker Image
-        run: |
-          docker build \
-            -t juice-shop:${{ github.sha }} \
-            .
-
-  syft:
-    name: Generate SBOM
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: bkimminich/juice-shop
-          format: cyclonedx-json
-
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: "*.json"
-          
-  trivy:
-    name: Trivy Container Scan
-    runs-on: ubuntu-latest
-    needs: sonarcloud
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'bkimminich/juice-shop'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-
-      - name: Upload Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-report
-          path: trivy-results.sarif
-
   push-ecr:
-    name: Push Image to ECR
+    name: Build, Scan & Push to ECR
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-
+    needs: checkov
+    outputs:
+      image_tag: ${{ steps.build-image.outputs.image }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -211,25 +125,36 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: sa-east-1
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build Docker Image
+        id: build-image
         run: |
-          docker build -t juice-shop-devsecops .
+          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com/juice-shop-devsecops:latest"
+          docker build -t $IMAGE_URI .
+          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-      - name: Tag Docker Image
-        run: |
-          docker tag juice-shop-devsecops:latest \
-          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/juice-shop-devsecops:latest
+      - name: Run Trivy Container Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com/juice-shop-devsecops:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy-results.sarif
 
       - name: Push Docker Image
         run: |
-          docker push \
-          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/juice-shop-devsecops:latest
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com/juice-shop-devsecops:latest
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
@@ -240,18 +165,34 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           echo "$COSIGN_PRIVATE_KEY" > cosign.key
+          cosign sign --key cosign.key ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com/juice-shop-devsecops:latest --yes
 
-          cosign sign \
-          --key cosign.key \
-          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/juice-shop-devsecops:latest \
-          --yes
-    
-  deploy-ecs:
+  syft:
+    name: Generate SBOM
     runs-on: ubuntu-latest
     needs: push-ecr
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com/juice-shop-devsecops:latest
+          format: cyclonedx-json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: "*.json"
+
+  deploy-ecs:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: push-ecr
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -266,3 +207,26 @@ jobs:
             --cluster devsecops-cluster \
             --service juice-shop-service \
             --force-new-deployment
+
+  zap-dast:
+    name: OWASP ZAP DAST
+    runs-on: ubuntu-latest
+    needs: deploy-ecs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: 'http://56.125.129.90:3000' 
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: report_html.html
